@@ -1,0 +1,20 @@
+groups:
+  - name: deployment_and_security_alerts
+    rules:
+      - alert: HighErrorRateDegradation
+        expr: rate(http_requests_total{status=~"5.."}[1m]) > 0.1
+        for: 10s
+        labels:
+          severity: critical
+        annotations:
+          summary: "High HTTP 5xx Error Rate detected on service"
+          description: "Service is returning errors above threshold. Automatic rollback recommended."
+
+      - alert: TenantUnauthorizedAbuseAttempt
+        expr: rate(http_requests_total{status="403"}[1m]) > 0.2
+        for: 5s
+        labels:
+          severity: warning
+        annotations:
+          summary: "Suspicious unauthorized traffic detected"
+          description: "Potential tenant spoofing or missing headers detected at edge."

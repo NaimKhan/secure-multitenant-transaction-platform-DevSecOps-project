@@ -1,0 +1,13 @@
+networks:
+  private-backend:
+    external: true
+
+services:
+  api-service:
+    image: ${IMAGE_NAME:-axiler/api-service:v1.0.0}
+    networks:
+      - private-backend
+    environment:
+      - RELEASE_VERSION=v1.0.1-degraded
+      - FAILURE_MODE=true  # Forces 500 status and failed healthcheck
+

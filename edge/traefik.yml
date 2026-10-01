@@ -1,0 +1,22 @@
+entryPoints:
+  web:
+    address: ":80"
+
+providers:
+  docker:
+    swarmMode: true
+    exposedByDefault: false
+
+api:
+  dashboard: true
+  insecure: true
+
+accessLog:
+  filePath: "/var/log/traefik/access.log"
+  format: json
+  fields:
+    headers:
+      defaultMode: keep
+      names:
+        X-Tenant-ID: keep
+        Authorization: drop

@@ -1,0 +1,79 @@
+networks:
+  public-edge:
+    driver: overlay
+  private-backend:
+    driver: overlay
+    internal: true  # Prevents direct outbound or external inbound internet/host access
+
+secrets:
+  db_password:
+    external: true
+
+services:
+  edge-gateway:
+    image: traefik:v2.11
+    command:
+      - "--configfile=/etc/traefik/traefik.yml"
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./edge/traefik.yml:/etc/traefik/traefik.yml:ro
+    networks:
+      - public-edge
+      - private-backend
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+
+  api-service:
+    image: ${IMAGE_NAME:-axiler/api-service:v1.0.0}
+    secrets:
+      - db_password
+    networks:
+      - private-backend
+    environment:
+      - RELEASE_VERSION=${RELEASE_VERSION:-v1.0.0}
+      - FAILURE_MODE=false
+    deploy:
+      replicas: 3
+      update_config:
+        parallelism: 1
+        delay: 5s
+        failure_action: rollback
+        monitor: 10s
+        max_failure_ratio: 0.1
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        order: stop-first
+      resources:
+        limits:
+          cpus: '0.50'
+          memory: 256M
+        reservations:
+          cpus: '0.10'
+          memory: 64M
+      labels:
+        - "traefik.enable=true"
+        - "traefik.http.routers.api.rule=PathPrefix(`/search`) || PathPrefix(`/transfer`) || PathPrefix(`/health`)"
+        - "traefik.http.routers.api.entrypoints=web"
+        - "traefik.http.services.api.loadbalancer.server.port=8000"
+        - "traefik.http.middlewares.rate-limit.ratelimit.average=10"
+        - "traefik.http.middlewares.rate-limit.ratelimit.burst=5"
+        - "traefik.http.routers.api.middlewares=rate-limit@swarm"
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports:
+      - "9090:9090"
+    networks:
+      - public-edge
+      - private-backend
+    deploy:
+      replicas: 1
