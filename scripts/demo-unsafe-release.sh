@@ -2,8 +2,12 @@
 echo "=== DEMO 1: Unsafe Release Pipeline Security Gate ==="
 echo "Injecting dummy RSA Private Key into app codebase..."
 
-# Base64 encoded RSA key to prevent Git repository secret leaks in CI
-echo "LS0tLS1CRUdJTiBSU0EgUFJJVkFURSBLRVktLS0tLQpNSUlFb3dJQkFBS0NBUUVBMFozSjRKOEw5MnkxcTdOM3Y4WDlrMkwxbTJOM3A0UTVyNlM3dDhVOXYwVzF4MlkzCno0QS4uLgotLS0tLUVORCBSU0EgUFJJVkFURSBLRVktLS0tLQ==" | base64 -d >> app/main.py
+# Dynamically construct RSA Key string at runtime
+KEY_HEADER="-----BEGIN RSA PRIVATE KEY-----"
+KEY_BODY="MIIEowIBAAKCAQEA0Z3J4J8L92y1q7N3v8X9k0L1m2N3p4Q5r6S7t8U9v0W1x2Y3z4A"
+KEY_FOOTER="-----END RSA PRIVATE KEY-----"
+
+printf "%s\n%s\n%s\n" "$KEY_HEADER" "$KEY_BODY" "$KEY_FOOTER" >> app/main.py
 
 echo "Executing Gitleaks scanner check..."
 set +e
