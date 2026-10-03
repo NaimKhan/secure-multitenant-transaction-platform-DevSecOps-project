@@ -1,3 +1,1 @@
-# Ignore demo scripts intended for local security testing
-scripts/demo-unsafe-release.sh
-app/main.py
+680ed6cab3729f5213fdc5fa17862cdd373313b3:scripts/demo-unsafe-release.sh:private-key:8
