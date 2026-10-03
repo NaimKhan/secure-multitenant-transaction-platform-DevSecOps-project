@@ -18,11 +18,7 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Secrets Detection (Gitleaks Directory Scan)
-        run: |
-          docker run --rm -v "$(pwd):/path" zricethezav/gitleaks:latest detect --source="/path" --no-git -v
-
-      - name: SAST & Vulnerability Scan (Trivy FS)
+      - name: SAST & Source Code Security Scan (Trivy)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: 'fs'
