@@ -25,7 +25,7 @@ jobs:
           ignore-unfixed: true
           severity: 'CRITICAL,HIGH'
           exit-code: '0'
-          security-checks: 'vuln,secret,config'
+          scanners: 'vuln,secret,config'
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -47,6 +47,7 @@ jobs:
           format: 'table'
           exit-code: '0'
           severity: 'CRITICAL'
+          scanners: 'vuln,secret'
 
       - name: Generate Software Bill of Materials (SBOM)
         uses: anchore/sbom-action@v0.15.10
