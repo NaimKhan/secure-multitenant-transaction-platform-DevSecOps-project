@@ -47,6 +47,8 @@ jobs:
           image: axiler/api-service:test
           format: cyclonedx-json
           output-file: app-sbom.cyclonedx.json
+          artifact-name: app-sbom-cyclonedx
+          upload-artifact: false
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.4.0
