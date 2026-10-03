@@ -1,0 +1,3 @@
+# Ignore demo scripts intended for local security testing
+scripts/demo-unsafe-release.sh
+app/main.py
