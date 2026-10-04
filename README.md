@@ -1,719 +1,593 @@
-# Secure Multi-Tenant Transaction Platform — DevSecOps Lab
+# Customer-Managed & Restricted / Air-Gapped Environment Delivery Design
 
-[![Secure DevSecOps Release Pipeline](https://github.com/NaimKhan/secure-multitenant-transaction-platform-DevSecOps-project/actions/workflows/ci-cd.yaml/badge.svg)](https://github.com/NaimKhan/secure-multitenant-transaction-platform-DevSecOps-project/actions)
+## Overview
 
-> **Production-grade DevSecOps Lab** demonstrating a secure, multi-tenant financial services platform running on **Docker Swarm**, with edge security, network isolation, supply-chain security, immutable releases, automated rollback, secrets management, and observability.
+This document specifies the architecture and operational guidelines for delivering the **Axiler Transaction Platform** into customer-managed, restricted, or fully air-gapped environments.
 
-**Services:** `Search` · `Transfer` · `Health`
+In these environments, the production platform may have no direct internet connectivity and therefore cannot depend on external container registries, CI/CD systems, or internet-based observability services.
 
----
-
-## 1. Requirement vs. Implementation Summary
-
-| #     | Requirement / Challenge           | Problem Statement                                                                        | Implemented DevSecOps Solution                                                                                                                 |
-| ----- | --------------------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1** | **Multi-Tenancy & Edge Security** | Prevent unauthorized access and cross-tenant access.                                     | **Traefik Edge Gateway** validates `X-Tenant-ID` (`Alpha` / `Beta`) and enforces rate limiting.                                                |
-| **2** | **Network Isolation**             | Prevent direct external access to backend services.                                      | Application services run on an isolated Docker Swarm **`private-backend` overlay network** behind the edge gateway.                            |
-| **3** | **Supply Chain Security**         | Prevent secrets, vulnerable dependencies, and untrusted artifacts from reaching release. | GitHub Actions pipeline with **Trivy scanning, Gitleaks, CycloneDX SBOM generation, Cosign signing, and immutable image digests**.             |
-| **4** | **Secrets & Least Privilege**     | Avoid plaintext credentials and privileged containers.                                   | Docker Swarm Secrets mounted under **`/run/secrets/`** and application containers run as non-root **UID/GID `10001:10001`**.                   |
-| **5** | **Auto-Rollback & Resiliency**    | Prevent unhealthy releases from remaining in production.                                 | Docker Swarm **healthchecks + `update_config` / `rollback_config`** automatically revert failed deployments.                                   |
-| **6** | **Air-Gapped Delivery**           | Support customer-managed environments without internet connectivity.                     | `make bundle` generates an offline release package containing images, manifests, SBOMs, SHA256 checksums, and verification/deployment helpers. |
+The delivery model provides a **self-contained, verifiable, and repeatable release process** using signed offline artifacts, integrity verification, container image packaging, declarative deployment manifests, SBOMs, and controlled rollback procedures.
 
 ---
 
-## 2. System Architecture
+## 1. Release Packaging & Trust Verification
 
-### 2.1 CI/CD & Software Supply-Chain Flow
+In an air-gapped environment, the platform cannot directly reach external registries such as **GHCR** or **Docker Hub**, nor can it communicate with external CI/CD infrastructure.
 
-```text
-┌──────────────────────┐
-│   Developer Push     │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────────────────────────────┐
-│           GitHub Actions Pipeline             │
-└──────────────────────┬───────────────────────┘
-                       │
-        ┌──────────────┼───────────────┐
-        │              │               │
-        ▼              ▼               ▼
-┌──────────────┐ ┌──────────────┐ ┌───────────────┐
-│ Secret Scan  │ │ Build & Scan │ │  SBOM         │
-│   Gitleaks   │ │    Trivy     │ │  CycloneDX    │
-└──────┬───────┘ └──────┬───────┘ └───────┬───────┘
-       │                │                 │
-       └────────────────┼─────────────────┘
-                        ▼
-             ┌──────────────────────┐
-             │ Immutable Image      │
-             │ SHA256 Digest        │
-             └──────────┬───────────┘
-                        │
-                        ▼
-             ┌──────────────────────┐
-             │ Cosign / Sigstore    │
-             │ Image Signing        │
-             └──────────┬───────────┘
-                        │
-                        ▼
-             ┌──────────────────────┐
-             │      GHCR            │
-             │ Container Registry   │
-             └──────────┬───────────┘
-                        │
-                        ▼
-                 Secure Deployment
-```
-
-### 2.2 Runtime Architecture & Trust Boundaries
-
-```text
-                         External Clients
-                               │
-                               │ HTTP :80
-                               ▼
-┌──────────────────────────────────────────────────────────┐
-│                  PUBLIC EDGE NETWORK                     │
-│                                                          │
-│                 Traefik Edge Gateway                     │
-│                                                          │
-│  • X-Tenant-ID validation                                │
-│  • Allowed tenants: Alpha / Beta                         │
-│  • Rate limiting: 10 req/s, burst 5                     │
-│  • Access / security telemetry                           │
-└───────────────────────────┬──────────────────────────────┘
-                            │
-                            │
-                            │ private-backend
-                            │ Overlay Network
-                            ▼
-              ┌──────────────────────────────┐
-              │       PRIVATE BACKEND        │
-              │                              │
-              │  ┌────────────────────────┐  │
-              │  │   Multi-Tenant API     │  │
-              │  │                        │  │
-              │  │ • Search               │  │
-              │  │ • Transfer             │  │
-              │  │ • Health               │  │
-              │  │                        │  │
-              │  │ • Non-root UID 10001   │  │
-              │  │ • Swarm Secrets        │  │
-              │  └───────────┬────────────┘  │
-              │              │               │
-              │              │ Metrics       │
-              │              ▼               │
-              │  ┌────────────────────────┐  │
-              │  │      Prometheus        │  │
-              │  │ • Metrics collection   │  │
-              │  │ • Alerting             │  │
-              │  └────────────────────────┘  │
-              └──────────────────────────────┘
-```
-
-### Key Trust Boundaries
-
-**Public Edge → Private Backend**
-
-External traffic enters through Traefik. Application services are placed behind the isolated `private-backend` overlay network rather than being directly exposed to external clients.
-
-**Tenant Identity**
-
-Requests must contain an allowed tenant identity:
-
-```http
-X-Tenant-ID: Alpha
-```
-
-or:
-
-```http
-X-Tenant-ID: Beta
-```
-
-Missing or unauthorized tenant identities are rejected with `403 Forbidden`.
-
-**Application Privilege**
-
-Application containers run as non-root UID/GID `10001:10001`, reducing the impact of a potential container compromise.
-
----
-
-## 3. Security Controls
-
-### 3.1 Edge Security
-
-Traefik provides the first security enforcement layer:
-
-* Tenant identity validation
-* Unauthorized tenant rejection
-* Request rate limiting
-* Access logging
-* Security telemetry
-
-Configured rate limit:
-
-```text
-10 requests / second
-Burst: 5
-```
-
----
-
-### 3.2 Network Isolation
-
-The application services communicate through the Docker Swarm overlay network:
-
-```text
-private-backend
-```
-
-The intended traffic flow is:
-
-```text
-Internet
-   │
-   ▼
-Traefik
-   │
-   ▼
-private-backend
-   │
-   ▼
-Application
-```
-
-This prevents the application service from being treated as a directly exposed public endpoint.
-
----
-
-### 3.3 Secrets Management
-
-Sensitive values are provided through **Docker Swarm Secrets**.
-
-Secrets are exposed to the application through:
-
-```text
-/run/secrets/
-```
-
-They are not intended to be stored as plaintext credentials in source control or ordinary environment variables.
-
----
-
-### 3.4 Least Privilege
-
-Application containers run as:
-
-```text
-UID: 10001
-GID: 10001
-```
-
-The application is therefore not dependent on root privileges for normal operation.
-
----
-
-## 4. Software Supply-Chain Security
-
-The CI/CD pipeline applies multiple security controls before release.
-
-### Secret Detection
-
-**Gitleaks** detects accidentally committed secrets such as:
-
-* Private keys
-* API credentials
-* Passwords
-* Tokens
-
-A detected secret causes the security gate to fail.
-
-### Vulnerability Scanning
-
-**Trivy** is used to scan application/container-related artifacts for known vulnerabilities.
-
-### SBOM Generation
-
-A **CycloneDX JSON SBOM** is generated during the build.
-
-Example:
-
-```text
-app-sbom.cyclonedx.json
-```
-
-The SBOM provides a machine-readable inventory of software components included in the release.
-
-### Container Signing
-
-Container images are signed using:
-
-```text
-Cosign / Sigstore
-```
-
-This provides cryptographic verification of the release artifact.
-
-### Immutable Images
-
-Deployment references immutable SHA256 digests rather than relying only on mutable image tags:
-
-```text
-registry/image@sha256:<digest>
-```
-
-This makes the deployed artifact explicitly identifiable and reduces ambiguity around mutable tags.
-
----
-
-## 5. Repository Structure
-
-```text
-.
-├── .github/
-│   └── workflows/
-│       └── ci-cd.yaml
-│           # CI/CD pipeline:
-│           # security scanning, SBOM, signing, GHCR release
-│
-├── app/
-│   ├── ...
-│   # FastAPI application source
-│   # Search / Transfer / Health endpoints
-│   # Non-root container configuration
-│
-├── docs/
-│   ├── ...
-│   # Design documentation
-│   # Restricted / air-gapped delivery guide
-│
-├── edge/
-│   ├── ...
-│   # Traefik edge gateway
-│   # Tenant validation
-│   # Rate limiting
-│
-├── observability/
-│   ├── ...
-│   # Prometheus configuration
-│   # Metrics
-│   # Operational alert rules
-│
-├── scripts/
-│   ├── ...
-│   # Demonstration scenarios
-│   # Security tests
-│   # Release/bundle helpers
-│
-├── swarm/
-│   ├── docker-compose.yml
-│   # Docker Swarm stack configuration
-│
-├── Makefile
-│   # One-command operational workflows
-│   # up / down / demos / bundle
-│
-└── README.md
-    # Project documentation
-```
-
----
-
-## 6. Quick Start
-
-### Prerequisites
-
-Required tools:
-
-* Docker Engine
-* Docker Swarm
-* Git
-* Make
-* curl
-* jq
-
-Initialize Swarm if it has not already been initialized:
-
-```bash
-docker swarm init
-```
-
-Verify Docker:
-
-```bash
-docker info
-```
-
----
-
-### Deploy the Platform
-
-Run:
-
-```bash
-make up
-```
-
-This initializes and deploys:
-
-* Docker Swarm secrets
-* Overlay networks
-* Traefik edge gateway
-* Application services
-* Prometheus observability
-
----
-
-### Verify Services
-
-```bash
-docker service ls
-```
-
-Inspect a specific service:
-
-```bash
-docker service ps <service-name>
-```
-
----
-
-### Tear Down
-
-```bash
-make down
-```
-
----
-
-## 7. Required Demonstration Scenarios
-
-The repository contains reproducible demonstrations for the major assessment requirements.
-
----
-
-### Scenario 1 — Unsafe Release Security Gate
-
-Simulates an unsafe release containing an injected credential or RSA private key.
-
-Run:
-
-```bash
-make demo-unsafe-release
-```
-
-Expected behavior:
-
-```text
-Injected Secret
-      │
-      ▼
-  Gitleaks
-      │
-      ▼
-Security Gate FAILED
-      │
-      ▼
-Release BLOCKED
-```
-
-**Expected Outcome:** The scanner detects the exposed secret and prevents the unsafe release from progressing.
-
----
-
-### Scenario 2 — Bad Deployment & Automatic Rollback
-
-Deploys a deliberately degraded release:
-
-```text
-v1.0.1-degraded
-```
-
-The degraded release produces HTTP `500` responses and fails health checks.
-
-Run:
-
-```bash
-make demo-bad-deploy
-```
-
-Expected flow:
-
-```text
-Healthy v1.0.0
-      │
-      ▼
-Deploy v1.0.1-degraded
-      │
-      ▼
-Health Checks Fail
-      │
-      ▼
-Deployment Degraded
-      │
-      ▼
-Automatic Rollback
-      │
-      ▼
-Healthy v1.0.0
-```
-
-**Expected Outcome:** Docker Swarm detects the unhealthy release and automatically rolls back to the previous healthy version according to the configured rollback policy.
-
----
-
-### Scenario 3 — Suspicious & Unauthorized Traffic
-
-Tests tenant identity enforcement and rate limiting.
-
-Run:
-
-```bash
-make demo-suspicious-traffic
-```
-
-Expected results:
-
-| Test Case                    | Expected Result |
-| ---------------------------- | --------------- |
-| `X-Tenant-ID: Alpha`         | `200 OK`        |
-| `X-Tenant-ID: Beta`          | `200 OK`        |
-| Missing `X-Tenant-ID`        | `403 Forbidden` |
-| `X-Tenant-ID: MaliciousCorp` | `403 Forbidden` |
-| Excessive request burst      | Rate limited    |
-
----
-
-## 8. Observability & Telemetry
-
-The platform includes Prometheus-based operational monitoring.
-
-### Prometheus
-
-When running locally:
-
-```text
-http://localhost:9090
-```
-
-### Application Metrics
-
-The application exposes HTTP metrics with contextual labels such as:
-
-```text
-http_requests_total{
-  tenant="Alpha",
-  version="v1.0.0"
-}
-```
-
-These labels allow request behavior to be correlated with:
-
-* Tenant
-* Application version
-* HTTP status
-* Request activity
-
-### Alert Rules
-
-Operational and security-oriented alert rules are maintained under:
-
-```text
-observability/alerts.yml
-```
-
-Examples include:
-
-```text
-HighErrorRate
-TenantUnauthorizedAbuseAttempt
-```
-
----
-
-## 9. Air-Gapped / Customer-Managed Delivery
-
-The project supports environments where the deployment target cannot directly access the public internet.
-
-Generate an offline release bundle:
+Therefore, releases are packaged into a self-contained offline bundle using:
 
 ```bash
 make bundle
 ```
 
-The bundle is designed to contain:
+Example release artifact:
 
 ```text
-Release Bundle
-├── Container Images
-├── Deployment Manifests
-├── SBOMs
-├── SHA256 Checksums
-├── Cosign Verification Material
-└── Deployment Helpers
+axiler-release-v1.0.0-offline.tar.gz
 ```
 
-The intended delivery flow is:
+### 1.1 Bundle Contents
+
+The offline release bundle contains the following artifacts:
+
+| Component                  | Description                                             |
+| -------------------------- | ------------------------------------------------------- |
+| Container Image Tarballs   | Gzip-compressed Docker images such as `api-service.tar` |
+| Software Bill of Materials | Machine-readable CycloneDX JSON SBOM                    |
+| Declarative Manifests      | Docker Swarm stack / Compose deployment definitions     |
+| Integrity Information      | SHA256 checksum manifest                                |
+| Authenticity Information   | Cosign signature and public-key verification materials  |
+| Operational Helpers        | Offline installation and verification scripts           |
+
+Example bundle contents:
 
 ```text
-Build
-  │
-  ▼
-Security Scan
-  │
-  ▼
-Generate SBOM
-  │
-  ▼
-Sign Images
-  │
-  ▼
-Generate Checksums
-  │
-  ▼
-Create Offline Bundle
-  │
-  ▼
-Transfer to Restricted Environment
-  │
-  ▼
-Verify Artifacts
-  │
-  ▼
-Deploy
+axiler-release-v1.0.0-offline/
+├── images/
+│   └── api-service.tar
+├── sbom/
+│   └── app-sbom.cyclonedx.json
+├── manifests/
+│   └── docker-compose.yml
+├── security/
+│   ├── checksums.sha256
+│   ├── bundle.sig
+│   └── cosign.pub
+└── scripts/
+    ├── install.sh
+    └── verify.sh
 ```
 
-Detailed verification and offline upgrade procedures are documented in:
+> The exact generated bundle structure should match the output produced by the repository's `make bundle` implementation.
 
-```text
-docs/RESTRICTED_DELIVERY.md
+### 1.2 Customer Verification Procedure
+
+Before executing any installation or deployment step, the customer should verify the integrity and authenticity of the received release artifacts on an approved bastion or administration host.
+
+#### Step 1 — Verify SHA256 Integrity
+
+```bash
+sha256sum -c checksums.sha256
 ```
 
----
+This verifies that the release artifacts have not been modified or corrupted during transfer.
 
-## 10. Makefile Operations
+#### Step 2 — Verify Cosign Signature
 
-The project provides a simplified operational interface through `make`.
+Using the vendor-provided public key:
 
-| Command                        | Purpose                                          |
-| ------------------------------ | ------------------------------------------------ |
-| `make up`                      | Deploy the complete platform                     |
-| `make down`                    | Remove the deployed environment                  |
-| `make demo-unsafe-release`     | Demonstrate secret/security gate                 |
-| `make demo-bad-deploy`         | Demonstrate failed deployment and rollback       |
-| `make demo-suspicious-traffic` | Demonstrate tenant enforcement and rate limiting |
-| `make bundle`                  | Generate the offline release bundle              |
+```bash
+cosign verify-blob \
+  --key cosign.pub \
+  --signature bundle.sig \
+  axiler-release-v1.0.0-offline.tar.gz
+```
 
----
+A successful verification confirms that the release bundle was signed using the corresponding trusted signing key.
 
-## 11. Release Security Model
-
-The overall release lifecycle is designed around the following principle:
+### 1.3 Release Trust Flow
 
 ```text
-        Source Code
-             │
-             ▼
-       Secret Detection
-             │
-             ▼
-    Vulnerability Scanning
-             │
-             ▼
-       Build Container
-             │
-             ▼
-         Generate SBOM
-             │
-             ▼
-        Sign Artifact
-             │
-             ▼
-     Immutable Digest
-             │
-             ▼
-        Deploy Release
-             │
-             ▼
-       Health Checks
-             │
-       ┌─────┴─────┐
-       │           │
-    Healthy      Failed
-       │           │
-       ▼           ▼
-    Continue    Rollback
-       │           │
-       └─────┬─────┘
-             ▼
-        Observability
+                  Offline Release Bundle
+                           │
+                           ▼
+                 ┌──────────────────┐
+                 │  SHA256 Verify   │
+                 │    Integrity     │
+                 └────────┬─────────┘
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │  Cosign Verify   │
+                 │   Authenticity   │
+                 └────────┬─────────┘
+                          │
+                    Verification
+                       Passed
+                          │
+                          ▼
+                 ┌──────────────────┐
+                 │    Installation  │
+                 │    / Deployment  │
+                 └──────────────────┘
 ```
 
 ---
 
-## 12. AI Usage Statement
+# 2. Air-Gapped Installation & Controlled Upgrade Strategy
 
-AI-assisted development tools were used for initial configuration bootstrapping and Bash script scaffolding.
+## 2.1 Initial Installation
 
-AI-generated suggestions were treated as development input and were reviewed before implementation, particularly for security-sensitive configurations.
+The initial deployment is performed entirely from the verified offline release bundle.
 
-### Security Review Example
+### Step 1 — Extract the Release Bundle
 
-An initial AI suggestion proposed mounting the Docker socket directly into the API container while running the application with root privileges.
+```bash
+tar -xzf axiler-release-v1.0.0-offline.tar.gz
+cd axiler-release-v1.0.0-offline
+```
 
-This approach was rejected as an insecure design because unrestricted Docker socket access can provide excessive control over the Docker host.
+### Step 2 — Load Container Images
 
-The implemented design instead uses:
+Load the packaged container image into the local Docker environment:
 
-* Non-root application execution
-* UID/GID `10001:10001`
-* Restricted Docker socket access where required
-* Read-only Docker socket access (`:ro`) for the relevant edge component
-* Public-edge / private-backend network separation
-* Docker Swarm Secrets for sensitive credentials
+```bash
+docker load -i api-service.tar
+```
 
-This demonstrates an important DevSecOps principle:
+For larger customer-managed environments, the image may instead be imported into an internal air-gapped container registry.
 
-> **AI-generated configuration is subject to security review and engineering validation before adoption.**
+### Step 3 — Initialize Docker Swarm Secrets
+
+Sensitive credentials must not be embedded into application images or committed directly into deployment manifests.
+
+Example:
+
+```bash
+docker secret create db_password \
+  - < /path/to/secure/db_password
+```
+
+### Step 4 — Deploy the Stack
+
+```bash
+docker stack deploy \
+  -c docker-compose.yml \
+  axiler-stack
+```
+
+Verify the deployed services:
+
+```bash
+docker service ls
+```
+
+and:
+
+```bash
+docker service ps axiler-stack_api-service
+```
 
 ---
 
-## 13. Key DevSecOps Practices Demonstrated
+## 2.2 Controlled Upgrade Strategy
 
-This project brings together the following practices in a single reproducible environment:
+For a new release, the customer receives a new offline release bundle through the approved secure transfer process.
 
-* 🔐 Multi-tenant request isolation
-* 🛡️ Edge security controls
-* 🌐 Network segmentation
-* 🔎 Secret detection
-* 🧪 Vulnerability scanning
-* 📦 SBOM generation
-* ✍️ Container image signing
-* 🔒 Immutable image deployment
-* 🔑 Secrets management
-* 👤 Non-root container execution
-* ♻️ Automated rollback
-* 📊 Prometheus observability
-* 🚨 Security/operational alerting
-* 📦 Offline / air-gapped delivery
-* 🤖 Security review of AI-assisted configuration
+Example:
+
+```text
+Current Release
+     │
+     ▼
+v1.0.0
+     │
+     │  New Offline Release
+     ▼
+v1.1.0 Bundle
+     │
+     ├── SHA256 Verification
+     ├── Cosign Verification
+     ├── Image Import
+     └── Controlled Deployment
+              │
+              ▼
+         Rolling Update
+```
+
+### Load the New Image
+
+```bash
+docker load -i api-service-v1.1.0.tar
+```
+
+### Trigger a Controlled Rolling Update
+
+```bash
+docker service update \
+  --image axiler/api-service:v1.1.0 \
+  --update-parallelism 1 \
+  --update-delay 5s \
+  axiler-stack_api-service
+```
+
+The controlled update strategy limits the number of tasks updated simultaneously and introduces a delay between updates, reducing the risk of a full-service outage during deployment.
+
+### Verify the Updated Service
+
+```bash
+docker service ps axiler-stack_api-service
+```
+
+and:
+
+```bash
+docker service inspect axiler-stack_api-service
+```
+
+Application-level health and expected service behavior should also be validated after the upgrade.
 
 ---
 
-## 14. Assessment Notes
+# 3. Offline Rollback & Diagnostics
 
-The repository is structured to make the implementation easy to evaluate:
+## 3.1 Rollback Procedure
 
-**Requirement → Implementation → Configuration → Demonstration**
+If the newly deployed release experiences runtime issues or health-check failures, the deployment can be reverted using Docker Swarm rollback mechanisms.
 
-Each major assessment area is represented by:
+### Automated Rollback
 
-1. A documented requirement
-2. An implementation in the repository
-3. A reproducible command or configuration
-4. An expected security/operational outcome
+Docker Swarm's `rollback_config` can automatically revert a failed deployment according to the configured health-check and rollback policy.
 
-The demonstration scenarios can be executed independently to verify the major security, resiliency, and release-engineering controls.
+The actual rollback timing depends on the configured:
+
+* Health-check interval
+* Health-check timeout
+* Failure threshold
+* `update_config`
+* `rollback_config`
+
+Therefore, the rollback behavior should be validated in the target customer environment before production rollout.
+
+### Manual Rollback
+
+Operators can manually revert the service to its previous version:
+
+```bash
+docker service rollback axiler-stack_api-service
+```
+
+Verify the resulting service state:
+
+```bash
+docker service ps axiler-stack_api-service
+```
+
+---
+
+## 3.2 Diagnostics & Troubleshooting
+
+Air-gapped environments cannot rely on external observability platforms or internet-based troubleshooting services.
+
+The following commands provide a basic offline diagnostic workflow.
+
+### Check Service Health
+
+```bash
+docker service ps axiler-stack_api-service
+```
+
+### Inspect Service Configuration
+
+```bash
+docker service inspect axiler-stack_api-service
+```
+
+### Inspect Runtime Logs
+
+```bash
+docker service logs -f axiler-stack_api-service
+```
+
+### Export Diagnostic Telemetry
+
+```bash
+docker service inspect \
+  axiler-stack_api-service \
+  > diagnostic-report.json
+```
+
+Additional container-level information can be collected with:
+
+```bash
+docker ps
+```
+
+and:
+
+```bash
+docker inspect <container_id>
+```
+
+### Recommended Offline Incident Workflow
+
+```text
+Service Alert / User Report
+            │
+            ▼
+    Check Service State
+            │
+            ▼
+   Check Task / Replica Status
+            │
+            ▼
+      Inspect Logs
+            │
+            ▼
+ Inspect Deployment Configuration
+            │
+       ┌────┴────┐
+       │         │
+     Healthy   Unhealthy
+       │         │
+       ▼         ▼
+ Continue      Rollback
+ Monitoring       │
+                  ▼
+          Export Diagnostics
+```
+
+---
+
+# 4. Security Considerations for Restricted Environments
+
+Air-gapped deployment reduces external network dependencies but does not automatically make the environment secure.
+
+The following controls should remain enforced throughout the release and operational lifecycle.
+
+## 4.1 Artifact Integrity
+
+Every release should contain:
+
+* SHA256 checksums
+* CycloneDX SBOM
+* Cosign signature
+* Trusted public key
+* Versioned deployment manifests
+
+Artifacts should be verified before installation.
+
+## 4.2 Image Provenance
+
+Container images should originate from the approved CI/CD supply chain.
+
+Unverified or locally modified images should not be introduced into the production environment unless explicitly authorized by the customer's release-management process.
+
+## 4.3 Secrets Management
+
+Application secrets must be supplied through controlled secret-management mechanisms.
+
+For the current Docker Swarm implementation:
+
+```text
+Docker Swarm Secrets
+        │
+        ▼
+/run/secrets/<secret-name>
+        │
+        ▼
+Application Container
+```
+
+Secrets must not be:
+
+* Hard-coded in source code
+* Stored inside Dockerfiles
+* Embedded into container images
+* Committed to Git
+* Stored in publicly accessible configuration files
+
+## 4.4 Network Isolation
+
+The application should continue to use the defined internal network boundaries.
+
+External traffic should enter through the approved edge gateway, while backend services remain isolated on the internal Docker Swarm overlay network.
+
+---
+
+# 5. Known Gaps & Recommended Production Improvements
+
+The current implementation demonstrates the required DevSecOps controls while keeping the lab environment operationally lightweight.
+
+For a larger enterprise production environment, the following improvements are recommended:
+
+| Component             | Current Local / Demo Approach                                   | Recommended Production Improvement                                                               |
+| --------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
+| Secret Management     | Docker Swarm Secrets initialized through controlled CLI scripts | Integrate HashiCorp Vault or another customer-approved enterprise secrets manager                |
+| Registry Management   | Direct `docker load` on Swarm nodes                             | Deploy an internal air-gapped registry such as Harbor or Nexus with controlled image replication |
+| Policy Enforcement    | Traefik-based tenant/header validation                          | Add centralized policy enforcement and runtime admission controls where supported                |
+| Image Trust           | Release-level Cosign verification                               | Enforce signed-image and provenance policies throughout the production supply chain              |
+| Observability Storage | Local / ephemeral Prometheus storage                            | Configure durable metric storage and offline log aggregation                                     |
+| Key Management        | Vendor/customer-managed signing materials                       | Integrate enterprise KMS/HSM where required                                                      |
+| Access Control        | Host and Swarm-level administrative controls                    | Integrate centralized enterprise IAM/RBAC and privileged-access management                       |
+| Disaster Recovery     | Application-level rollback                                      | Add customer-specific backup, restore, and disaster-recovery procedures                          |
+
+---
+
+# 6. Enterprise Air-Gapped Deployment Model
+
+A mature customer-managed deployment can evolve toward the following architecture:
+
+```text
+                         Vendor CI/CD
+                              │
+                              │ Signed Release
+                              ▼
+                 ┌────────────────────────┐
+                 │ Offline Release Bundle │
+                 │                        │
+                 │ • Container Images     │
+                 │ • SBOM                 │
+                 │ • Signatures           │
+                 │ • Checksums            │
+                 │ • Deployment Manifests │
+                 └───────────┬────────────┘
+                             │
+                      Secure Transfer
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │ Customer Bastion       │
+                 │                        │
+                 │ SHA256 Verification    │
+                 │ Cosign Verification   │
+                 └───────────┬────────────┘
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │ Internal Registry      │
+                 │ / Artifact Repository  │
+                 └───────────┬────────────┘
+                             │
+                             ▼
+                 ┌────────────────────────┐
+                 │ Docker Swarm Cluster   │
+                 │                        │
+                 │  ┌──────────────────┐  │
+                 │  │ Traefik Gateway  │  │
+                 │  └────────┬─────────┘  │
+                 │           │            │
+                 │  ┌────────▼─────────┐  │
+                 │  │ Private Backend  │  │
+                 │  │ Overlay Network  │  │
+                 │  └────────┬─────────┘  │
+                 │           │            │
+                 │  ┌────────▼─────────┐  │
+                 │  │ API Services     │  │
+                 │  └──────────────────┘  │
+                 └────────────────────────┘
+```
+
+This model separates the **vendor release process** from the **customer runtime environment**, while preserving artifact integrity and software provenance throughout the delivery lifecycle.
+
+---
+
+# 7. Operational Checklist
+
+## Release Verification
+
+* [ ] Release version confirmed
+* [ ] Offline bundle received through the approved channel
+* [ ] SHA256 checksums verified
+* [ ] Cosign signature verified
+* [ ] Trusted public key confirmed
+* [ ] SBOM present
+* [ ] Deployment manifests present
+* [ ] Required container images present
+
+## Pre-Deployment
+
+* [ ] Docker Swarm cluster is healthy
+* [ ] Required secrets are available
+* [ ] Required storage is available
+* [ ] Required internal network connectivity is verified
+* [ ] Previous healthy release is identified
+* [ ] Maintenance/change window is approved
+
+## Deployment
+
+* [ ] Container images imported successfully
+* [ ] Docker stack deployed
+* [ ] Expected service replicas are running
+* [ ] Health checks are passing
+* [ ] Application endpoints are validated
+* [ ] Tenant isolation is validated
+* [ ] Monitoring and alerts are operational
+
+## Post-Deployment
+
+* [ ] Application functionality verified
+* [ ] Runtime logs reviewed
+* [ ] Metrics reviewed
+* [ ] No unexpected errors observed
+* [ ] Release version confirmed
+* [ ] Required diagnostic information retained according to customer policy
+
+---
+
+# 8. Release Lifecycle
+
+```text
+Developer / CI
+      │
+      ▼
+Security Scanning
+      │
+      ▼
+SBOM Generation
+      │
+      ▼
+Container Image Build
+      │
+      ▼
+Image Signing
+      │
+      ▼
+Offline Bundle Creation
+      │
+      ▼
+Secure Transfer
+      │
+      ▼
+Customer Verification
+      │
+      ├──────── Verification Failed
+      │                    │
+      │                    ▼
+      │               Reject Release
+      │
+      ▼
+Image Import
+      │
+      ▼
+Controlled Deployment
+      │
+      ▼
+Health Validation
+      │
+      ├──────── Failure
+      │             │
+      │             ▼
+      │          Rollback
+      │
+      ▼
+Production Release
+      │
+      ▼
+Offline Monitoring
+& Diagnostics
+```
+
+---
+
+# 9. Summary
+
+The restricted-delivery model provides a controlled mechanism for deploying the **Axiler Transaction Platform** into environments where internet connectivity and external infrastructure cannot be relied upon.
+
+The approach combines:
+
+* Self-contained offline release bundles
+* SHA256 integrity verification
+* Cosign-based cryptographic verification
+* CycloneDX SBOMs
+* Immutable release artifacts
+* Docker Swarm deployment
+* Docker Swarm Secrets
+* Controlled rolling upgrades
+* Automated and manual rollback
+* Offline diagnostics
+* Customer-managed infrastructure
+* A defined path toward enterprise-grade air-gapped operations
+
+The design intentionally separates **release artifact creation and signing** from **customer-side deployment and operations**, allowing the customer to independently verify the integrity and authenticity of each release before it enters the restricted production environment.
 
